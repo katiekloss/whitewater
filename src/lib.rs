@@ -14,16 +14,17 @@ pub enum RaftState {
 }
 
 pub struct RpcLifecycle {
-    pub request: RpcRequest,
-    pub sender: oneshot::Sender<RpcResponse>
+    pub request: SetRequest,
+    pub sender: oneshot::Sender<SetResponse>
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct RpcRequest {
-    pub message: String
+pub struct SetRequest {
+    pub key: String,
+    pub value: String
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct RpcResponse {
+pub struct SetResponse {
     pub message: String
 }

@@ -1,20 +1,20 @@
-use std::{io, net::SocketAddr};
+use std::{collections::HashMap, fmt::format, io, net::SocketAddr};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::mpsc::{self, Receiver, Sender}};
-use whitewater::{RpcLifecycle, RpcRequest, RpcResponse};
+use whitewater::{Raft, RpcLifecycle, SetRequest, SetResponse};
 
 #[tokio::main]
 async fn main() -> io::Result<()>{
-    let (tx, rx) = mpsc::channel(16);
+    let (rpc_tx, rpc_rx) = mpsc::channel(16);
 
     tokio::select! {
-        _ = listen(tx) => { println!("Listener aborted"); },
-        _ = state_machine(rx) => { println!("State machine aborted"); }
+        _ = listen_rpc(rpc_tx) => { println!("Listener aborted"); },
+        _ = state_machine(rpc_rx) => { println!("State machine aborted"); }
     }
 
     Ok(())
 }
 
-async fn listen(chan: Sender<RpcLifecycle>) -> io::Result<()> {
+async fn listen_rpc(chan: Sender<RpcLifecycle>) -> io::Result<()> {
     let socket = TcpListener::bind("0.0.0.0:0").await?;
     println!("Listening on port {}", socket.local_addr().unwrap().port());
 
@@ -47,7 +47,7 @@ async fn handle_connection(mut conn: TcpStream, remote_addr: SocketAddr, request
             },
             Ok(n) => {
                 let buf = &buf[..n];
-                match rmp_serde::from_slice::<RpcRequest>(&buf) {
+                match rmp_serde::from_slice::<SetRequest>(&buf) {
                     Ok(r) => request = r,
                     Err(_) => {
                         eprintln!("Got garbage from {}", remote_addr);
@@ -82,13 +82,17 @@ async fn handle_connection(mut conn: TcpStream, remote_addr: SocketAddr, request
 }
 
 async fn state_machine(mut incoming: Receiver<RpcLifecycle>) -> io::Result<()> {
+    let mut map = HashMap::new();
+
     loop {
         let req = incoming.recv().await;
         match req {
             Some(r) => {
                 println!("{:?}", r.request);
-                let _ = r.sender.send(RpcResponse {
-                    message: "hello there!".to_string()
+                map.insert(r.request.key, r.request.value);
+
+                let _ = r.sender.send(SetResponse {
+                    message: "set".to_string()
                 });
             },
             None => return Ok(())
