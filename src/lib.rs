@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 pub struct Raft {
     pub commit_index: i64,
@@ -10,6 +11,11 @@ pub enum RaftState {
     Leader,
     Follower,
     Candidate
+}
+
+pub struct RpcLifecycle {
+    pub request: RpcRequest,
+    pub sender: oneshot::Sender<RpcResponse>
 }
 
 #[derive(Serialize, Deserialize, Debug)]
