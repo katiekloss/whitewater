@@ -3,7 +3,7 @@ use std::{io::{Read, Write}, net::TcpStream};
 use whitewater::{SetRequest, SetResponse};
 
 fn main() {
-    let mut socket = TcpStream::connect("127.0.0.1:51778").unwrap();
+    let mut socket = TcpStream::connect("127.0.0.1:7777").unwrap();
     let msg = rmp_serde::to_vec(&SetRequest {
         key: "hello".to_string(),
         value: "world".to_string()

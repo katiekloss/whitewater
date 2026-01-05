@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fmt::format, io, net::SocketAddr};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::mpsc::{self, Receiver, Sender}};
-use whitewater::{Raft, RpcLifecycle, SetRequest, SetResponse};
+use std::{collections::HashMap, io, net::SocketAddr, sync::{LazyLock, Mutex}};
+use tokio::{fs::OpenOptions, io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::mpsc::{self, Receiver, Sender}};
+use whitewater::{Raft, RaftLogEntry, RpcLifecycle, SetRequest, SetResponse};
 
 #[tokio::main]
 async fn main() -> io::Result<()>{
@@ -15,7 +15,7 @@ async fn main() -> io::Result<()>{
 }
 
 async fn listen_rpc(chan: Sender<RpcLifecycle>) -> io::Result<()> {
-    let socket = TcpListener::bind("0.0.0.0:0").await?;
+    let socket = TcpListener::bind("0.0.0.0:7777").await?;
     println!("Listening on port {}", socket.local_addr().unwrap().port());
 
     loop {
@@ -72,25 +72,36 @@ async fn handle_connection(mut conn: TcpStream, remote_addr: SocketAddr, request
             eprintln!("Failed to queue request: {}", e);
         }
 
-        let response = future_rx.await.unwrap();
-
-        let buf = rmp_serde::to_vec(&response).unwrap();
-        if let Err(e) = conn_tx.write(&buf).await {
-            eprintln!("Failed to write response: {}", e);
+        match future_rx.await {
+            Ok(response) => {
+                let buf = rmp_serde::to_vec(&response).unwrap();
+                if let Err(e) = conn_tx.write(&buf).await {
+                    eprintln!("Failed to write response: {}", e);
+                }
+            },
+            Err(e) => {
+                eprintln!("RPC handler failed: {}", e)
+            }
         }
     }
 }
 
 async fn state_machine(mut incoming: Receiver<RpcLifecycle>) -> io::Result<()> {
     let mut map = HashMap::new();
+    let raft = Raft {
+        term: 0,
+        commit_index: 0,
+        last_applied_index: 0,
+        state: whitewater::RaftState::Leader
+    };
 
     loop {
         let req = incoming.recv().await;
         match req {
             Some(r) => {
                 println!("{:?}", r.request);
+                write_log(raft.term, &r.request).await?;
                 map.insert(r.request.key, r.request.value);
-
                 let _ = r.sender.send(SetResponse {
                     message: "set".to_string()
                 });
@@ -98,4 +109,25 @@ async fn state_machine(mut incoming: Receiver<RpcLifecycle>) -> io::Result<()> {
             None => return Ok(())
         }
     }
+}
+
+async fn write_log(term: i64, write: &SetRequest) -> io::Result<()> {
+    static LOG_MUTEX: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+
+    let _handle = LOG_MUTEX.lock();
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("raft.log")
+        .await?;
+
+    let buf = rmp_serde::to_vec(&RaftLogEntry {
+        term,
+        key: &write.key,
+        value: &write.value
+    }).unwrap();
+
+    log_file.write_all(&buf).await?;
+
+    Ok(())
 }
