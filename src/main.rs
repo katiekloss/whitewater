@@ -6,6 +6,7 @@ mod kv;
 use crate::kv::Kv;
 
 mod raft;
+use crate::raft::Raft;
 
 mod rpc;
 
@@ -17,8 +18,11 @@ async fn main() -> io::Result<()>{
         rpc_channel: rpc_tx
     };
 
+    let raft = Raft::new();
+
     let kv = Kv {
-        rpc_channel: rpc_rx
+        rpc_channel: rpc_rx,
+        raft
     };
 
     tokio::select! {
