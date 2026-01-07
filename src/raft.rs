@@ -83,7 +83,7 @@ impl Raft {
             
             match frame {
                 RaftFrame::Set(key, value) => {
-                    self.write_log(&key, &value);
+                    self.write_log(&key, &value).await;
                     map.insert(key, value);
                 },
                 RaftFrame::AppendLogs(_) => {

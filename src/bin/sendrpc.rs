@@ -11,5 +11,5 @@ fn main() {
     let mut buf = vec![0; 8192];
     let n = socket.read(&mut buf).unwrap();
     let buf = &buf[..n];
-    println!("{:?}", &buf);
+    println!("{:?}", rmp_serde::from_slice::<RaftFrame>(&buf));
 }

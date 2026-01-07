@@ -15,14 +15,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> io::Result<()>{
     let args = Args::parse();
-
     let raft = Arc::new(Raft::new());
 
     if let Some(peer) = args.peer {
-        raft.join(peer).await;
+        raft.join(peer).await
     } else {
-        raft.run().await;
+        raft.run().await
     }
-
-    Ok(())
 }
