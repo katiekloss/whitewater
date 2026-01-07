@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -21,7 +23,8 @@ pub struct SetResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftFrame {
     Heartbeat,
-    AppendLogs(Vec<RaftLogEntry>)
+    AppendLogs(Vec<RaftLogEntry>),
+    Set(String, String)
 }
 
 

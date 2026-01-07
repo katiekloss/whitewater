@@ -9,7 +9,7 @@ pub struct RpcServer {
 
 impl RpcServer {
     pub async fn listen_rpc(self) -> io::Result<()> {
-        let socket = TcpListener::bind("0.0.0.0:7777").await?;
+        let socket = TcpListener::bind("0.0.0.0:0").await?;
         println!("Listening on port {}", socket.local_addr().unwrap().port());
 
         loop {
