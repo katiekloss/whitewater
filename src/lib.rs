@@ -16,3 +16,18 @@ pub struct SetRequest {
 pub struct SetResponse {
     pub message: String
 }
+
+// can this be done without Clone?
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RaftFrame {
+    Heartbeat,
+    AppendLogs(Vec<RaftLogEntry>)
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RaftLogEntry {
+    pub term: i64,
+    pub key: String,
+    pub value: String
+}

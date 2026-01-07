@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use crate::rpc::RpcServer;
 
@@ -18,11 +19,11 @@ async fn main() -> io::Result<()>{
         rpc_channel: rpc_tx
     };
 
-    let raft = Raft::new();
+    let raft = Arc::new(Raft::new());
 
     let kv = Kv {
         rpc_channel: rpc_rx,
-        raft
+        raft: raft.clone()
     };
 
     tokio::select! {
@@ -34,6 +35,11 @@ async fn main() -> io::Result<()>{
         r = kv.run() => {
             if let Err(e) = r {
                 eprintln!("KV store aborted: {}", e);
+            }
+        },
+        r = raft.run() => {
+            if let Err(e) = r {
+                eprintln!("Raft aborted: {}", e);
             }
         }
     }
