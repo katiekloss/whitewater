@@ -1,7 +1,7 @@
-use std::{io::{self}, net::SocketAddr, sync::{Arc, LazyLock, Mutex}, time::Duration};
+use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::{Arc, LazyLock, Mutex}, time::Duration};
 
 use tokio::{fs::OpenOptions, io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{broadcast::{self, Sender, error::RecvError}, mpsc::{self}}};
-use whitewater::{RaftFrame, RaftLogEntry, SetRequest};
+use whitewater::{RaftFrame, RaftLogEntry};
 
 pub enum RaftState {
     Leader,
@@ -27,10 +27,11 @@ impl Raft {
         let (raft_queue_tx, raft_queue_rx) = tokio::sync::mpsc::channel(16);
 
         let result;
-
+        
         tokio::select! {
             r = Self::run_listener(self.broadcaster.clone(), raft_queue_tx) => result = r,
-            r = Self::run_raft(raft_queue_rx, self.broadcaster.clone()) => result = r
+            r = Self::heartbeat(self.broadcaster.clone()) => result = r,
+            r = self.leader(raft_queue_rx) => result = r
         }
 
         // is there something like C#'s AggregateException?
@@ -39,15 +40,13 @@ impl Raft {
 
     pub async fn join(self: Arc<Self>, other_peer: SocketAddr) -> io::Result<()> {
         let conn = TcpStream::connect(other_peer).await?;
-        
         let (raft_queue_tx, raft_queue_rx) = tokio::sync::mpsc::channel(16);
 
         let result;
 
         tokio::select! {
             r = Self::handle_connection(conn, other_peer, self.broadcaster.subscribe(), raft_queue_tx) => result = r,
-            r = Self::run_raft(raft_queue_rx, self.broadcaster.clone()) => result = r,
-            r = Self::heartbeat(self.broadcaster.clone()) => result = r
+            r = self.follower(raft_queue_rx) => result = r
         }
 
         result
@@ -55,7 +54,7 @@ impl Raft {
 
     async fn run_listener(broadcaster: Sender<RaftFrame>, raft_queue: mpsc::Sender<RaftFrame>) -> io::Result<()> {
         let listener = TcpListener::bind("0.0.0.0:7778").await?;
-
+        
         loop {
             let (conn, addr) = listener.accept().await?;
             let receiver = broadcaster.subscribe();
@@ -68,20 +67,44 @@ impl Raft {
         }
     }
 
-    async fn run_raft(mut queue: mpsc::Receiver<RaftFrame>, broadcaster: broadcast::Sender<RaftFrame>) -> io::Result<()> {
+    async fn leader(self: Arc<Self>, mut queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
+        let mut map = HashMap::new();
+        println!("Leader starting");
+
         loop {
-            if let Some(frame) = queue.recv().await {
-                println!("Got a {:?}", frame);
-            } else {
+            let frame = queue.recv().await;
+            if frame.is_none() {
+                // channel closed
                 return Ok(())
+            }
+            let frame = frame.unwrap();
+            
+            println!("Got a {:?}", frame);
+            
+            match frame {
+                RaftFrame::Set(key, value) => {
+                    self.write_log(&key, &value);
+                    map.insert(key, value);
+                },
+                RaftFrame::AppendLogs(_) => {
+                    panic!("Another node sent me logs but that's my job");
+                }
             }
         }
     }
 
+    async fn follower(self: Arc<Self>, mut raft_queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
+        println!("Follower starting");
+        loop {
+            println!("Got {:?}", raft_queue.recv().await);
+        }
+    }
+
+    /// Occasionally sends an AppendLogs RPC with zero entries so that followers know we're still the leader
     async fn heartbeat(broadcaster: broadcast::Sender<RaftFrame>) -> io::Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let _ = broadcaster.send(RaftFrame::Heartbeat);
+            let _ = broadcaster.send(RaftFrame::AppendLogs(vec![]));
         }
     }
 
@@ -128,7 +151,7 @@ impl Raft {
         }
     }
 
-    pub async fn write_log(self: &Arc<Self>, write: &SetRequest) -> io::Result<()> {
+    pub async fn write_log(self: &Arc<Self>, key: &String, value: &String) -> io::Result<()> {
         static LOG_MUTEX: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
         let _handle = LOG_MUTEX.lock().unwrap();
@@ -140,15 +163,15 @@ impl Raft {
 
         let buf = rmp_serde::to_vec(&RaftLogEntry {
             term: self.term,
-            key: write.key.clone(), // TODO: zero copy somehow
-            value: write.value.clone()
+            key: key.clone(), // TODO: zero copy somehow
+            value: value.clone()
         }).unwrap();
 
         log_file.write_all(&buf).await?;
         let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(vec![RaftLogEntry {
             term: self.term,
-            key: write.key.clone(),
-            value: write.value.clone()
+            key: key.clone(),
+            value: value.clone()
         }]));
 
         if let Err(e) = logs_sent {
