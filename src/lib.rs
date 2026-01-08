@@ -10,6 +10,7 @@ pub enum RaftFrame {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RaftLogEntry {
     pub term: i64,
+    pub index: i64,
     pub key: String,
     pub value: String
 }

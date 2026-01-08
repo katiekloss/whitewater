@@ -154,38 +154,42 @@ impl Raft {
             };
 
             if result.is_err() {
+                println!("{}", result.err().unwrap());
                 return Ok(())
             }
         }
     }
 
-    pub async fn write_log(self: &Arc<Self>, key: &String, value: &String) -> io::Result<()> {
-        static LOG_MUTEX: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
+    /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
+    pub async fn write_log(self: &Arc<Self>, key: &String, value: &String) -> io::Result<i64> {
+        // serves to guard the log file itself as well (but this needs go elsewhere when we start loading logs FROM disk)
+        static COMMIT_INDEX: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
 
-        let _handle = LOG_MUTEX.lock().unwrap();
+        let mut commit_index = COMMIT_INDEX.lock().unwrap();
+        *commit_index += 1;
+
         let mut log_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open("raft.log")
             .await?;
 
-        let buf = rmp_serde::to_vec(&RaftLogEntry {
+        let log = RaftLogEntry {
             term: self.term,
+            index: *commit_index,
             key: key.clone(), // TODO: zero copy somehow
             value: value.clone()
-        }).unwrap();
+        };
+
+        let buf = rmp_serde::to_vec(&log).unwrap();
 
         log_file.write_all(&buf).await?;
-        let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(vec![RaftLogEntry {
-            term: self.term,
-            key: key.clone(),
-            value: value.clone()
-        }]));
+        let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(vec![log]));
 
         if let Err(e) = logs_sent {
             eprintln!("Failed to send logs: {}", e);
         }
 
-        Ok(())
+        Ok(*commit_index)
     }
 }
