@@ -135,11 +135,15 @@ impl Raft {
                 },
                 f = broadcaster.recv() => match f {
                     Ok(frame) => {
-                        println!("Sending {:?}", frame);
+                        println!("Sending {:?} to {}", frame, peer_addr);
                         match rmp_serde::to_vec(&frame) {
                             Ok(buf) => {
-                                tx.write(&buf).await;
-                                Ok(())
+                                // this is probably bad Rust
+                                if let Err(e) = tx.write(&buf).await {
+                                    Err(e.to_string())
+                                } else {
+                                    Ok(())
+                                }
                             },
                             Err(e) => panic!("Serialization error: {}", e)
                         }
@@ -148,6 +152,10 @@ impl Raft {
                     Err(RecvError::Lagged(_)) => panic!("Dropped frames")
                 }
             };
+
+            if result.is_err() {
+                return Ok(())
+            }
         }
     }
 
