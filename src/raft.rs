@@ -1,29 +1,72 @@
-use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::{Arc, LazyLock, Mutex}, time::Duration};
+use core::panic;
+use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}, net::SocketAddr, sync::Mutex, time::Duration};
 
-use tokio::{fs::OpenOptions, io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{broadcast::{self, Sender, error::RecvError}, mpsc::{self}}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{broadcast::{self, Sender, error::RecvError}, mpsc::{self}}};
 use whitewater::{RaftFrame, RaftLogEntry};
-
-pub enum RaftState {
-    Leader,
-    Follower,
-    Candidate
-}
 
 pub struct Raft {
     pub term: i64,
-    pub commit_index: i64,
-    pub last_applied_index: i64,
-    pub state: RaftState,
-    broadcaster: Sender<RaftFrame>
+    broadcaster: Sender<RaftFrame>,
+    /// Protects both the commit index and the log file
+    commit_index: Mutex<i64>,
+    //log_file: File,
+    map: HashMap<String,String>
 }
 
 impl Raft {
-    pub(crate) fn new() -> Self {
-        let (broadcaster, _) = tokio::sync::broadcast::channel(16);
-        Self { state: RaftState::Leader, term: 0, commit_index: 0, last_applied_index: 0, broadcaster }
+    pub(crate) async fn try_load() -> io::Result<Self> {
+        let mut term = 0;
+        let mut index = 0;
+        let mut map = HashMap::new();
+
+        let (broadcaster, _) = broadcast::channel(32);
+
+        let log_open = OpenOptions::new()
+            .read(true)
+            .open("raft.log");
+
+        if log_open.is_ok() {
+            let mut log_file = log_open.unwrap();
+            let mut msgpack_buf = vec![];
+
+            // read one byte at a time (don't @ me) and attempt to deserialize what we have so far into a log entry.
+            // when we read a complete entry, add it to the vector and try to do it again, until we reach the end of the file.
+            loop {
+                let mut buf = vec![0; 1];
+                match log_file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => msgpack_buf.append(&mut buf),
+                    Err(e) => panic!("{}", e)
+                };
+                
+                match rmp_serde::from_slice::<RaftLogEntry>(&msgpack_buf) {
+                    Ok(entry) => {
+                        msgpack_buf.clear();
+                        map.insert(entry.key, entry.value);
+                        if term < entry.term {
+                            term = entry.term
+                        }
+
+                        if index < entry.index {
+                            index = entry.index;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            println!("Loaded {} entries, term {}, index {}", map.len(), term, index);
+        }
+
+        Ok(Self {
+            broadcaster,
+            term: term,
+            commit_index: Mutex::new(index),
+            map
+        })
     }
 
-    pub async fn run(self: Arc<Self>) -> io::Result<()> {
+    pub async fn run(self: Box<Self>) -> io::Result<()> {
         let (raft_queue_tx, raft_queue_rx) = tokio::sync::mpsc::channel(16);
 
         let result;
@@ -38,7 +81,7 @@ impl Raft {
         result
     }
 
-    pub async fn join(self: Arc<Self>, other_peer: SocketAddr) -> io::Result<()> {
+    pub async fn join(self: Box<Self>, other_peer: SocketAddr) -> io::Result<()> {
         let conn = TcpStream::connect(other_peer).await?;
         let (raft_queue_tx, raft_queue_rx) = tokio::sync::mpsc::channel(16);
 
@@ -67,8 +110,7 @@ impl Raft {
         }
     }
 
-    async fn leader(self: Arc<Self>, mut queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
-        let mut map = HashMap::new();
+    async fn leader(mut self: Box<Self>, mut queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
         println!("Leader starting");
 
         loop {
@@ -84,7 +126,7 @@ impl Raft {
             match frame {
                 RaftFrame::Set(key, value) => {
                     self.write_log(&key, &value).await;
-                    map.insert(key, value);
+                    self.map.insert(key, value);
                 },
                 RaftFrame::AppendLogs(_) => {
                     panic!("Another node sent me logs but that's my job");
@@ -93,7 +135,7 @@ impl Raft {
         }
     }
 
-    async fn follower(self: Arc<Self>, mut raft_queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
+    async fn follower(self: Box<Self>, mut raft_queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
         println!("Follower starting");
         loop {
             println!("Got {:?}", raft_queue.recv().await);
@@ -161,18 +203,14 @@ impl Raft {
     }
 
     /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
-    pub async fn write_log(self: &Arc<Self>, key: &String, value: &String) -> io::Result<i64> {
-        // serves to guard the log file itself as well (but this needs go elsewhere when we start loading logs FROM disk)
-        static COMMIT_INDEX: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
-
-        let mut commit_index = COMMIT_INDEX.lock().unwrap();
+    pub async fn write_log(self: &Box<Self>, key: &String, value: &String) -> io::Result<i64> {
+        let mut commit_index = self.commit_index.lock().unwrap();
         *commit_index += 1;
 
         let mut log_file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("raft.log")
-            .await?;
+            .open("raft.log")?;
 
         let log = RaftLogEntry {
             term: self.term,
@@ -183,7 +221,7 @@ impl Raft {
 
         let buf = rmp_serde::to_vec(&log).unwrap();
 
-        log_file.write_all(&buf).await?;
+        log_file.write_all(&buf)?;
         let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(vec![log]));
 
         if let Err(e) = logs_sent {
