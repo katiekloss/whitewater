@@ -10,7 +10,8 @@ pub struct Raft {
     /// Protects both the commit index and the log file
     commit_index: Mutex<i64>,
     //log_file: File,
-    map: HashMap<String,String>
+    map: HashMap<String,String>,
+    log: Vec<RaftLogEntry>
 }
 
 impl Raft {
@@ -18,7 +19,7 @@ impl Raft {
         let mut term = 0;
         let mut index = 0;
         let mut map = HashMap::new();
-
+        let mut log = vec![];
         let (broadcaster, _) = broadcast::channel(32);
 
         let log_open = OpenOptions::new()
@@ -42,7 +43,7 @@ impl Raft {
                 match rmp_serde::from_slice::<RaftLogEntry>(&msgpack_buf) {
                     Ok(entry) => {
                         msgpack_buf.clear();
-                        map.insert(entry.key, entry.value);
+                        map.insert(entry.key.clone(), entry.value.clone());
                         if term < entry.term {
                             term = entry.term
                         }
@@ -50,19 +51,21 @@ impl Raft {
                         if index < entry.index {
                             index = entry.index;
                         }
+                        log.push(entry);
                     }
                     _ => {}
                 }
             }
 
-            println!("Loaded {} entries, term {term}, index {index}", map.len());
+            println!("Loaded {} entries, term {term}, index {index}", log.len());
         }
 
         Ok(Self {
             broadcaster,
             term: term,
             commit_index: Mutex::new(index),
-            map
+            map,
+            log
         })
     }
 
@@ -126,7 +129,6 @@ impl Raft {
             match frame {
                 RaftFrame::Set(key, value) => {
                     self.write_log(&key, &value).await;
-                    self.map.insert(key, value);
                 },
                 RaftFrame::AppendLogs(_) => {
                     panic!("Another node sent me logs but that's my job");
