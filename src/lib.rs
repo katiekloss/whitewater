@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub struct RaftRequest {
+    frame: RaftFrame
+}
+
 // can this be done without Clone?
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftFrame {

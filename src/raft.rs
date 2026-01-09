@@ -75,7 +75,6 @@ impl Raft {
         let result;
         
         tokio::select! {
-            r = Self::run_listener(self.broadcaster.clone(), raft_queue_tx) => result = r,
             r = Self::heartbeat(self.broadcaster.clone()) => result = r,
             r = self.leader(raft_queue_rx) => result = r
         }
@@ -88,29 +87,7 @@ impl Raft {
         let conn = TcpStream::connect(other_peer).await?;
         let (raft_queue_tx, raft_queue_rx) = tokio::sync::mpsc::channel(16);
 
-        let result;
-
-        tokio::select! {
-            r = Self::handle_connection(conn, other_peer, self.broadcaster.subscribe(), raft_queue_tx) => result = r,
-            r = self.follower(raft_queue_rx) => result = r
-        }
-
-        result
-    }
-
-    async fn run_listener(broadcaster: Sender<RaftFrame>, raft_queue: mpsc::Sender<RaftFrame>) -> io::Result<()> {
-        let listener = TcpListener::bind("0.0.0.0:7778").await?;
-        
-        loop {
-            let (conn, addr) = listener.accept().await?;
-            let receiver = broadcaster.subscribe();
-            let its_queue = raft_queue.clone();
-            tokio::spawn(async move {
-                println!("Connected to {addr}");
-                // handle this
-                let _ = Self::handle_connection(conn, addr, receiver, its_queue).await;
-            });
-        }
+        self.follower(raft_queue_rx).await
     }
 
     async fn leader(mut self: Box<Self>, mut queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
@@ -149,58 +126,6 @@ impl Raft {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let _ = broadcaster.send(RaftFrame::AppendLogs(vec![]));
-        }
-    }
-
-    /// awaits two possible send paths, incoming Raft frames sent by the peer, and outgoing Raft frames intended for broadcast to all peers.
-    /// Depending on which one produces data first, either receives the peer's frame into the global Raft queue or sends our frame to the peer, respectively.
-    async fn handle_connection(mut conn: TcpStream, peer_addr: SocketAddr, mut broadcaster: broadcast::Receiver<RaftFrame>, raft_queue: mpsc::Sender<RaftFrame>) -> io::Result<()> {
-        let (mut rx, mut tx) = conn.split();
-
-        loop {
-            let mut buf = vec![0; 8192];
-
-            let result = tokio::select! {
-                read_result = rx.read(&mut buf) => match read_result {
-                    Ok(0) => Err(format!("Connection from {peer_addr} dropped")),
-                    Ok(n) => {
-                        let buf = &buf[..n];
-                        match rmp_serde::from_slice::<RaftFrame>(&buf) {
-                            Ok(f) => {
-                                if let Err(e) = raft_queue.send(f).await {
-                                    println!("Failed to queue: {e:?}")
-                                }
-                                Ok(())
-                            },
-                            Err(e) => Err(e.to_string())
-                        }
-                    },
-                    Err(e) => Err(format!("Failed to read from {peer_addr}: {e}")),
-                },
-                f = broadcaster.recv() => match f {
-                    Ok(frame) => {
-                        println!("Sending {frame:?} to {peer_addr}");
-                        match rmp_serde::to_vec(&frame) {
-                            Ok(buf) => {
-                                // this is probably bad Rust
-                                if let Err(e) = tx.write(&buf).await {
-                                    Err(e.to_string())
-                                } else {
-                                    Ok(())
-                                }
-                            },
-                            Err(e) => panic!("Serialization error: {e}")
-                        }
-                    },
-                    Err(RecvError::Closed) => Err("not actually an error we're just done".to_string()),
-                    Err(RecvError::Lagged(_)) => panic!("Dropped frames")
-                }
-            };
-
-            if result.is_err() {
-                println!("{}", result.err().unwrap());
-                return Ok(())
-            }
         }
     }
 
