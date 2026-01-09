@@ -36,7 +36,7 @@ impl Raft {
                 match log_file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(_) => msgpack_buf.append(&mut buf),
-                    Err(e) => panic!("{}", e)
+                    Err(e) => panic!("{e}")
                 };
                 
                 match rmp_serde::from_slice::<RaftLogEntry>(&msgpack_buf) {
@@ -55,7 +55,7 @@ impl Raft {
                 }
             }
 
-            println!("Loaded {} entries, term {}, index {}", map.len(), term, index);
+            println!("Loaded {} entries, term {term}, index {index}", map.len());
         }
 
         Ok(Self {
@@ -103,7 +103,7 @@ impl Raft {
             let receiver = broadcaster.subscribe();
             let its_queue = raft_queue.clone();
             tokio::spawn(async move {
-                println!("Connected to {}", addr);
+                println!("Connected to {addr}");
                 // handle this
                 let _ = Self::handle_connection(conn, addr, receiver, its_queue).await;
             });
@@ -121,7 +121,7 @@ impl Raft {
             }
             let frame = frame.unwrap();
             
-            println!("Got a {:?}", frame);
+            println!("Got a {frame:?}");
             
             match frame {
                 RaftFrame::Set(key, value) => {
@@ -160,24 +160,24 @@ impl Raft {
 
             let result = tokio::select! {
                 read_result = rx.read(&mut buf) => match read_result {
-                    Ok(0) => Err(format!("Connection from {} dropped", peer_addr)),
+                    Ok(0) => Err(format!("Connection from {peer_addr} dropped")),
                     Ok(n) => {
                         let buf = &buf[..n];
                         match rmp_serde::from_slice::<RaftFrame>(&buf) {
                             Ok(f) => {
                                 if let Err(e) = raft_queue.send(f).await {
-                                    println!("Failed to queue: {:?}", e)
+                                    println!("Failed to queue: {e:?}")
                                 }
                                 Ok(())
                             },
                             Err(e) => Err(e.to_string())
                         }
                     },
-                    Err(e) => Err(format!("Failed to read from {}: {}", peer_addr, e)),
+                    Err(e) => Err(format!("Failed to read from {peer_addr}: {e}")),
                 },
                 f = broadcaster.recv() => match f {
                     Ok(frame) => {
-                        println!("Sending {:?} to {}", frame, peer_addr);
+                        println!("Sending {frame:?} to {peer_addr}");
                         match rmp_serde::to_vec(&frame) {
                             Ok(buf) => {
                                 // this is probably bad Rust
@@ -187,7 +187,7 @@ impl Raft {
                                     Ok(())
                                 }
                             },
-                            Err(e) => panic!("Serialization error: {}", e)
+                            Err(e) => panic!("Serialization error: {e}")
                         }
                     },
                     Err(RecvError::Closed) => Err("not actually an error we're just done".to_string()),
@@ -225,7 +225,7 @@ impl Raft {
         let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(vec![log]));
 
         if let Err(e) = logs_sent {
-            eprintln!("Failed to send logs: {}", e);
+            eprintln!("Failed to send logs: {e}");
         }
 
         Ok(*commit_index)
