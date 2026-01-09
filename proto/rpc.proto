@@ -2,17 +2,9 @@ syntax = "proto3";
 package whitewater;
 
 service WhitewaterRpc {
-    rpc Set (SetRequest) returns (SetReply);
-    rpc Run (stream RaftMessage) returns (stream RaftMessage);
-}
-
-message SetRequest {
-   string key = 1;
-   string value = 2;
-}
-
-message SetReply {
+    rpc Run (stream RaftMessage) returns (RaftMessage);
 }
 
 message RaftMessage {
+    string type = 1;
 }
