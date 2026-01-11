@@ -1,4 +1,4 @@
-use std::{io::{Error, Read}, net::SocketAddr};
+use std::{io::{Error, ErrorKind, Read}, net::SocketAddr};
 
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::WriteHalf}, sync::mpsc};
 use whitewater::{RaftFrame};
@@ -23,8 +23,6 @@ impl RpcListener {
                 _ = Self::handle_connection(its_queue, conn, addr).await;
             });
         }
-
-        Ok(())
     }
 
     pub async fn join(&self, peer: SocketAddr) -> Result<(), Error> {
@@ -35,11 +33,17 @@ impl RpcListener {
     }
 
     async fn handle_connection(connection_queue: mpsc::Sender<RpcConnectionEvent>, mut conn: TcpStream, peer: SocketAddr) -> Result<(), Error> {
+        println!("RPC connected to {peer:?}");
+
         let (mut conn_rx, mut conn_tx) = conn.split();
         let (recv_queue_tx, recv_queue_rx) = mpsc::channel(16);
         let (send_queue_tx, mut send_queue_rx) = mpsc::channel(16);
 
-        connection_queue.send(RpcConnectionEvent::Connected(peer, recv_queue_rx, send_queue_tx)).await;
+        if let Err(e) = connection_queue.send(RpcConnectionEvent::Connected(peer, recv_queue_rx, send_queue_tx)).await {
+            eprintln!("Failed to start connection to {peer}: {e}");
+            let _ = conn_tx.shutdown();
+            return Err(ErrorKind::BrokenPipe.into());
+        }
 
         loop {
             // make this less silly

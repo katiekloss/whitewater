@@ -1,7 +1,7 @@
 use core::panic;
-use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}, net::SocketAddr, sync::{Mutex}};
+use std::{collections::HashMap, fs::OpenOptions, io::{self, Error, Read, Write}, net::SocketAddr, sync::Mutex};
 
-use tokio::{net::TcpStream, sync::mpsc::self};
+use tokio::sync::mpsc::{self};
 use whitewater::{CompleteLogEntry, RaftFrame};
 
 use crate::rpc::RpcConnectionEvent;
@@ -14,7 +14,15 @@ pub struct Raft {
     commit_index: Mutex<i64>,
     //log_file: File,
     map: HashMap<String,String>,
-    log: Vec<CompleteLogEntry>
+    log: Vec<CompleteLogEntry>,
+}
+
+struct RaftConnection<'a> {
+    addr: SocketAddr,
+    send: &'a mpsc::Sender<RaftFrame>,
+    receive: &'a mpsc::Receiver<RaftFrame>,
+    next_index: u64,
+    replicated_index: u64
 }
 
 impl Raft {
@@ -71,7 +79,7 @@ impl Raft {
         })
     }
 
-    pub async fn run(mut self) -> io::Result<()> {
+    pub async fn run(self) -> io::Result<()> {
         let result;
         
         tokio::select! {
@@ -82,14 +90,17 @@ impl Raft {
         result
     }
 
-    async fn leader(&mut self) -> io::Result<()> {
-        println!("Leader starting");
+    async fn leader(mut self) -> io::Result<()> {
+        println!("Raft starting");
+        let mut conns = vec![];
 
         loop {
             let conn = self.connection_queue.recv().await;
             match conn {
                 Some(RpcConnectionEvent::Connected(peer, recv, send)) => {
-                    println!("{peer} connected");
+                    conns.push(tokio::spawn(async move {
+                        Self::handle(peer, send, recv).await;
+                    }));
                 },
                 None => {
                     return Ok(())
@@ -98,31 +109,20 @@ impl Raft {
         }
     }
 
-    async fn follower(&self, mut raft_queue: mpsc::Receiver<RaftFrame>) -> io::Result<()> {
-        println!("Follower starting");
+    async fn handle(peer: SocketAddr, _send: mpsc::Sender<RaftFrame>, mut recv: mpsc::Receiver<RaftFrame>) -> Result<(), Error> {
         loop {
-            println!("Got {:?}", raft_queue.recv().await);
+            match recv.recv().await {
+                Some(frame) => {
+                    println!("{peer}: {frame:?}");
+                },
+                None => {
+                    break;
+                }
+            }
         }
+        
+        Ok(())
     }
-
-    /// Occasionally sends an AppendLogs RPC with zero entries so that followers know we're still the leader
-    // async fn heartbeat(broadcaster: broadcast::Sender<RaftFrame>) -> io::Result<()> {
-    //     loop {
-    //         tokio::time::sleep(Duration::from_secs(1)).await;
-
-    //         let send = broadcaster.send(RaftFrame::AppendLogs(AppendLogsFrame{
-    //             term: 0,
-    //             prev_log_index: 0,
-    //             prev_log_term: 0,
-    //             commit_index: 0,
-    //             logs: vec![]
-    //         }));
-
-    //         if let Err(e) = send {
-    //             panic!("idk: {e}");
-    //         }
-    //     }
-    // }
 
     /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
     pub async fn write_log(&self, key: &String, value: &String) -> io::Result<i64> {
