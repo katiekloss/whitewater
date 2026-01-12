@@ -1,81 +1,96 @@
 use core::panic;
-use std::{collections::HashMap, fs::OpenOptions, io::{self, Error, Read, Write}, net::SocketAddr, sync::Mutex};
+use std::{collections::HashMap, io::{self, Error}, net::SocketAddr};
 
-use tokio::sync::mpsc::{self};
-use whitewater::{CompleteLogEntry, RaftFrame};
+use tokio::{sync::{mpsc::{self}, oneshot}, task::JoinSet};
+use whitewater::{CompleteLogEntry, RaftFrame, ShortLogEntry};
 
-use crate::rpc::RpcConnectionEvent;
+use crate::{log::{LogWrite}, rpc::RpcConnectionEvent};
 
-
-pub struct Raft {
-    pub term: i64,
-    connection_queue: mpsc::Receiver<RpcConnectionEvent>,
-    /// Protects both the commit index and the log file
-    commit_index: Mutex<i64>,
-    //log_file: File,
-    map: HashMap<String,String>,
-    log: Vec<CompleteLogEntry>,
+enum Event {
+    WriteCommitted(CompleteLogEntry)
 }
 
-struct RaftConnection<'a> {
+pub struct Raft {
+    connection_queue: mpsc::Receiver<RpcConnectionEvent>,
+    map: HashMap<String,String>,
+    log: mpsc::Sender<LogWrite>,
+    pub term: u64,
+    pub commit_index: u64
+}
+
+struct RaftConnection {
+    initialized: bool,
     addr: SocketAddr,
-    send: &'a mpsc::Sender<RaftFrame>,
-    receive: &'a mpsc::Receiver<RaftFrame>,
+    recv: mpsc::Receiver<RaftFrame>,
     next_index: u64,
-    replicated_index: u64
+    current_position: u64,
+    log: mpsc::Sender<LogWrite>
+}
+
+impl RaftConnection {
+    async fn handle(&mut self, mut raft: mpsc::Sender<Event>) -> Result<(), Error> {
+        loop {
+            let frame = match self.recv.recv().await {
+                Some(frame) => {
+                    println!("{}: {:?}", self.addr, frame);
+                    frame
+                },
+                None => {
+                    break;
+                }
+            };
+
+            match frame {
+                RaftFrame::Initialize { current_position } => {
+                    println!("{} is at {current_position}", self.addr);
+                    self.current_position = current_position;
+                    self.initialized = true;
+                },
+                RaftFrame::Set(key, value) => {
+                    let (response_tx, response_rx) = oneshot::channel();
+                    let write = LogWrite {
+                        entry: ShortLogEntry {
+                            key,
+                            value
+                        },
+                        response: response_tx
+                    };
+
+                    if let Err(e) = self.log.send(write).await {
+                        panic!("{e}");
+                    }
+
+                    match response_rx.await {
+                        Ok(entry) => {
+                            if let Err(e) = raft.send(Event::WriteCommitted(entry)).await {
+                                panic!("{e}");
+                            }
+                        },
+                        Err(e) => {
+                            panic!("{e}");
+                        }
+                    }
+                },
+                _ => {
+
+                }
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 impl Raft {
-    pub(crate) async fn new(connection_queue: mpsc::Receiver<RpcConnectionEvent>) -> io::Result<Self> {
-        let mut term = 0;
-        let mut index = 0;
-        let mut map = HashMap::new();
-        let mut log = vec![];
-
-        let log_open = OpenOptions::new()
-            .read(true)
-            .open("raft.log");
-
-        if log_open.is_ok() {
-            let mut log_file = log_open.unwrap();
-            let mut msgpack_buf = vec![];
-
-            // read one byte at a time (don't @ me) and attempt to deserialize what we have so far into a log entry.
-            // when we read a complete entry, add it to the vector and try to do it again, until we reach the end of the file.
-            loop {
-                let mut buf = vec![0; 1];
-                match log_file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => msgpack_buf.append(&mut buf),
-                    Err(e) => panic!("{e}")
-                };
-                
-                match rmp_serde::from_slice::<CompleteLogEntry>(&msgpack_buf) {
-                    Ok(entry) => {
-                        msgpack_buf.clear();
-                        map.insert(entry.key.clone(), entry.value.clone());
-                        if term < entry.term {
-                            term = entry.term
-                        }
-
-                        if index < entry.index {
-                            index = entry.index;
-                        }
-                        log.push(entry);
-                    }
-                    _ => {}
-                }
-            }
-
-            println!("Loaded {} entries, term {term}, index {index}", log.len());
-        }
+    pub(crate) fn new(connection_queue: mpsc::Receiver<RpcConnectionEvent>, log: mpsc::Sender<LogWrite>) -> io::Result<Self> {
+        let map = HashMap::new();
 
         Ok(Self {
             connection_queue,
-            term: term,
-            commit_index: Mutex::new(index),
             map,
-            log
+            log,
+            term: 0,
+            commit_index: 0
         })
     }
 
@@ -90,66 +105,42 @@ impl Raft {
         result
     }
 
-    async fn leader(mut self) -> io::Result<()> {
+    async fn leader(self) -> io::Result<()> {
         println!("Raft starting");
-        let mut conns = vec![];
+        let mut conns = JoinSet::new();
+
+        let mut queue = self.connection_queue;
+        let (self_tx, _self_rx) = mpsc::channel(32);
 
         loop {
-            let conn = self.connection_queue.recv().await;
-            match conn {
+            let conn_event = queue.recv().await;
+            match conn_event {
                 Some(RpcConnectionEvent::Connected(peer, recv, send)) => {
-                    conns.push(tokio::spawn(async move {
-                        Self::handle(peer, send, recv).await;
-                    }));
-                },
-                None => {
-                    return Ok(())
-                }
-            }
-        }
-    }
+                    let mut conn = RaftConnection {
+                        initialized: false,
+                        addr: peer,
+                        recv,
+                        next_index: 0,
+                        current_position: 0,
+                        log: self.log.clone()
+                    };
 
-    async fn handle(peer: SocketAddr, _send: mpsc::Sender<RaftFrame>, mut recv: mpsc::Receiver<RaftFrame>) -> Result<(), Error> {
-        loop {
-            match recv.recv().await {
-                Some(frame) => {
-                    println!("{peer}: {frame:?}");
+                    if let Err(e) = send.send(RaftFrame::Initialize { current_position: self.commit_index }).await {
+                        panic!("{e}");
+                    }
+
+                    let self_tx = self_tx.clone();
+
+                    conns.spawn(async move {
+                        let _ = conn.handle(self_tx).await;
+                    });
                 },
                 None => {
                     break;
                 }
             }
         }
-        
+
         Ok(())
-    }
-
-    /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
-    pub async fn write_log(&self, key: &String, value: &String) -> io::Result<i64> {
-        let mut commit_index = self.commit_index.lock().unwrap();
-        *commit_index += 1;
-
-        let mut log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("raft.log")?;
-
-        let log = CompleteLogEntry {
-            term: self.term,
-            index: *commit_index,
-            key: key.clone(), // TODO: zero copy somehow
-            value: value.clone()
-        };
-
-        let buf = rmp_serde::to_vec(&log).unwrap();
-
-        log_file.write_all(&buf)?;
-        // let logs_sent = self.broadcaster.send(RaftFrame::AppendLogs(todo!()));
-
-        // if let Err(e) = logs_sent {
-        //     eprintln!("Failed to send logs: {e}");
-        // }
-
-        Ok(*commit_index)
     }
 }

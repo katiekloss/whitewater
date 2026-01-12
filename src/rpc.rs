@@ -20,7 +20,9 @@ impl RpcListener {
             let (conn, addr) = listener.accept().await?;
             let its_queue = self.connection_queue.clone();
             _ = tokio::spawn(async move {
-                _ = Self::handle_connection(its_queue, conn, addr).await;
+                if let Err(e) = Self::handle_connection(its_queue, conn, addr).await {
+                    println!("Connection with {addr} dropped: {e}");
+                }
             });
         }
     }
@@ -49,30 +51,22 @@ impl RpcListener {
             // make this less silly
             let mut buf = vec![0; 8192];
 
-            let _ = tokio::select! {
+            let result = tokio::select! {
                 r = send_queue_rx.recv() => {
-                    Self::on_raft_dequeue(r, &mut conn_tx).await;
-
-                    // not necessarily
-                    return Ok(())
+                    Self::on_raft_dequeue(r, &mut conn_tx).await
                 },
                 r = conn_rx.read(&mut buf) => {
                     match r {
-                        Ok(0) => {
-
-                        },
-                        Ok(n) => {
-                            Self::on_net_receive(&buf[..n], &recv_queue_tx).await;
-                        },
-                        Err(e) => {
-
-                        }
+                        Ok(0) => Err(ErrorKind::ConnectionAborted.into()),
+                        Ok(n) => Self::on_net_receive(&buf[..n], &recv_queue_tx).await,
+                        Err(e) => Err(e)
                     }
-
-                    // this either
-                    return Ok(())
                 }
             };
+
+            if let Err(e) = result {
+                return Err(e);
+            }
         }
     }
 
