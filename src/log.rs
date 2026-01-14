@@ -1,31 +1,25 @@
 use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}, sync::Mutex};
-
-use tokio::sync::{mpsc, oneshot};
-use whitewater::{CompleteLogEntry, ShortLogEntry};
-
-pub struct LogWrite {
-    pub entry: ShortLogEntry,
-    pub response: oneshot::Sender<CompleteLogEntry>
-}
+use whitewater::CompleteLogEntry;
 
 pub struct RaftLog {
     pub term: u64,
-    queue: mpsc::Receiver<LogWrite>,
     /// Protects both the commit index and the log file
-    pub commit_index: Mutex<u64>
+    commit_index: Mutex<u64>,
+    log: Option<Vec<CompleteLogEntry>>
 }
 
 impl RaftLog {
-    pub(crate) fn new(queue: mpsc::Receiver<LogWrite>) -> Self {
+    pub(crate) fn new() -> Self {
         
         Self {
             term: 0,
-            queue,
-            commit_index: Mutex::new(0)
+            commit_index: Mutex::new(0),
+            log: None
         }
     }
 
-    pub async fn load(&mut self) -> HashMap<String, String> {
+    /// returns term, commit index, map
+    pub async fn load(&mut self) -> (u64, u64, HashMap<String, String>) {
         let mut index = self.commit_index.lock().unwrap();
         
         let mut map = HashMap::new();
@@ -67,30 +61,42 @@ impl RaftLog {
             }
 
             println!("Loaded {} entries, term {}, index {}", logs.len(), self.term, *index);
+            self.log = Some(logs);
         }
 
-        map
+        (self.term, *index, map)
     }
 
-    pub async fn run(mut self) {
-        loop {
-            match self.queue.recv().await {
-                Some(write) => {
-                    match self.write_log(write.entry.key, write.entry.value) {
-                        Ok(entry) => write.response.send(entry).unwrap(),
-                        Err(e) => panic!("{e}")
-                    };
-                },
-                None => {
-                    break;
-                }
-            }
+    // pub async fn run(mut self) {
+    //     loop {
+    //         match self.queue.recv().await {
+    //             Some(LogRpc::Write { entry, response }) => {
+    //                 match self.write_log(entry.key, entry.value) {
+    //                     Ok(entry) => response.send(entry).unwrap(),
+    //                     Err(e) => panic!("{e}")
+    //                 };
+    //             },
+    //             Some(LogRpc::Get { from, response }) => {
+    //                 match self.log {
+    //                     None => {
+    //                         panic!("Log isn't loaded");
+    //                     }
+    //                     Some(ref log) => {
+    //                         // don't copy here (but the whole program probably shouldn't use message passing ugh)
+    //                         response.send(log.iter().filter(|e| (**e).index <= from).map(|e| e.clone()).collect());
+    //                     }
+    //                 };
+    //             }
+    //             None => {
+    //                 break;
+    //             }
+    //         }
             
-        }
-    }
+    //     }
+    // }
 
     /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
-    fn write_log(&self, key: String, value: String) -> io::Result<CompleteLogEntry> {
+    pub fn write_log(&self, key: String, value: String) -> io::Result<CompleteLogEntry> {
         let mut commit_index = self.commit_index.lock().unwrap();
         *commit_index += 1;
 

@@ -1,146 +1,92 @@
 use core::panic;
-use std::{collections::HashMap, io::{self, Error}, net::SocketAddr};
+use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::Mutex};
 
-use tokio::{sync::{mpsc::{self}, oneshot}, task::JoinSet};
-use whitewater::{CompleteLogEntry, RaftFrame, ShortLogEntry};
+use tokio::sync::broadcast::{self};
+use whitewater::{CompleteLogEntry, IncomingRaftFrame, RaftFrame};
+use crate::log::RaftLog;
 
-use crate::{log::{LogWrite}, rpc::RpcConnectionEvent};
-
-enum Event {
+#[derive(Clone)]
+pub enum Event {
     WriteCommitted(CompleteLogEntry)
 }
 
 pub struct Raft {
-    connection_queue: mpsc::Receiver<RpcConnectionEvent>,
     map: HashMap<String,String>,
-    log: mpsc::Sender<LogWrite>,
+    log: Mutex<RaftLog>,
     pub term: u64,
-    pub commit_index: u64
-}
-
-struct RaftConnection {
-    initialized: bool,
-    addr: SocketAddr,
-    recv: mpsc::Receiver<RaftFrame>,
-    next_index: u64,
-    current_position: u64,
-    log: mpsc::Sender<LogWrite>
-}
-
-impl RaftConnection {
-    async fn handle(&mut self, mut raft: mpsc::Sender<Event>) -> Result<(), Error> {
-        loop {
-            let frame = match self.recv.recv().await {
-                Some(frame) => {
-                    println!("{}: {:?}", self.addr, frame);
-                    frame
-                },
-                None => {
-                    break;
-                }
-            };
-
-            match frame {
-                RaftFrame::Initialize { current_position } => {
-                    println!("{} is at {current_position}", self.addr);
-                    self.current_position = current_position;
-                    self.initialized = true;
-                },
-                RaftFrame::Set(key, value) => {
-                    let (response_tx, response_rx) = oneshot::channel();
-                    let write = LogWrite {
-                        entry: ShortLogEntry {
-                            key,
-                            value
-                        },
-                        response: response_tx
-                    };
-
-                    if let Err(e) = self.log.send(write).await {
-                        panic!("{e}");
-                    }
-
-                    match response_rx.await {
-                        Ok(entry) => {
-                            if let Err(e) = raft.send(Event::WriteCommitted(entry)).await {
-                                panic!("{e}");
-                            }
-                        },
-                        Err(e) => {
-                            panic!("{e}");
-                        }
-                    }
-                },
-                _ => {
-
-                }
-            }
-        }
-        
-        Ok(())
-    }
+    pub commit_index: u64,
+    pub global_send: Option<broadcast::Sender<Event>>
 }
 
 impl Raft {
-    pub(crate) fn new(connection_queue: mpsc::Receiver<RpcConnectionEvent>, log: mpsc::Sender<LogWrite>) -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         let map = HashMap::new();
 
         Ok(Self {
-            connection_queue,
             map,
-            log,
+            log: Mutex::new(RaftLog::new()),
             term: 0,
-            commit_index: 0
+            commit_index: 0,
+            global_send: None
         })
     }
 
-    pub async fn run(self) -> io::Result<()> {
-        let result;
-        
-        tokio::select! {
-            r = self.leader() => result = r
+    pub async fn run(mut self, frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
+        {
+            let mut log = self.log.lock().unwrap();
+            (self.term, self.commit_index, self.map) = log.load().await;
         }
 
-        // is there something like C#'s AggregateException?
-        result
+        tokio::select! {
+            r = self.handle_frames(frame_queue) => r,
+        }
     }
 
-    async fn leader(self) -> io::Result<()> {
-        println!("Raft starting");
-        let mut conns = JoinSet::new();
+    async fn handle_frames(&self, mut frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
+        println!("Raft started");
 
-        let mut queue = self.connection_queue;
-        let (self_tx, _self_rx) = mpsc::channel(32);
-
+        // this keeps the queues from being dropped in the loop, which immediately hangs up on the peer,
+        // but they eventually need to go somewhere so we can talk to our friends
+        let mut queues = vec![];
         loop {
-            let conn_event = queue.recv().await;
-            match conn_event {
-                Some(RpcConnectionEvent::Connected(peer, recv, send)) => {
-                    let mut conn = RaftConnection {
-                        initialized: false,
-                        addr: peer,
-                        recv,
-                        next_index: 0,
-                        current_position: 0,
-                        log: self.log.clone()
-                    };
+            match frame_queue.recv().await {
+                Ok(IncomingRaftFrame::Connect(peer, queue)) => {
+                    println!("{peer} connected");
 
-                    if let Err(e) = send.send(RaftFrame::Initialize { current_position: self.commit_index }).await {
-                        panic!("{e}");
+                    if let Err(e) = queue.send(RaftFrame::Initialize { current_position: self.commit_index }).await {
+                        println!("Failed to initialize {peer}: {e}");
                     }
 
-                    let self_tx = self_tx.clone();
-
-                    conns.spawn(async move {
-                        let _ = conn.handle(self_tx).await;
-                    });
+                    queues.push(queue);
                 },
-                None => {
-                    break;
+                Ok(IncomingRaftFrame::Normal { peer, frame}) => {
+                    self.on_frame(peer, frame).await;
+                },
+                Ok(IncomingRaftFrame::Disconnect(peer)) => {
+                    println!("{peer} disconnected");
+                },
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Ok(());
+                },
+                Err(e) => {
+                    panic!("{e}");
                 }
             }
         }
+    }
 
-        Ok(())
+    // this needs to be mut self in order for handle_set to take the lock,
+    // but that moves self out of the main loop, which is what I'm getting stuck on every time
+    async fn on_frame(&self, peer: SocketAddr, frame: RaftFrame) {
+        println!("{peer}: {frame:?}");
+    }
+
+    async fn handle_set(&mut self, key: String, value: String) {
+        let log = self.log.lock().unwrap();
+
+        match log.write_log(key, value) {
+            Ok(entry) => self.global_send.as_ref().expect("Raft was not properly initialized").send(Event::WriteCommitted(entry)),
+            Err(e) => panic!("{e}")
+        };
     }
 }

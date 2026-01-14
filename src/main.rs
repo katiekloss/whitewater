@@ -1,10 +1,9 @@
 use std::io;
 use std::net::SocketAddr;
 use clap::Parser;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 mod raft;
-use crate::log::RaftLog;
 use crate::raft::Raft;
 use crate::rpc::RpcListener;
 
@@ -22,37 +21,23 @@ struct Args {
 async fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    let (connection_queue_tx, connection_queue_rx) = mpsc::channel(32);
-    let (log_tx, log_rx) = mpsc::channel(32);
+    let (rpc_queue_tx, rpc_queue_rx) = broadcast::channel(128);
 
-    let mut log = RaftLog::new(log_rx);
-    log.load().await;
+    let raft = Raft::new()?;
 
-    let mut raft = Raft::new(connection_queue_rx, log_tx)?;
-
-    // these very much don't belong here
-    {
-        let commit_index = log.commit_index.lock().unwrap();
-        raft.term = log.term;
-        raft.commit_index = *commit_index;
-    }
-
-    let rpc = RpcListener {
-        connection_queue: connection_queue_tx
-    };
+    let rpc = RpcListener {};
 
     let run_rpc = async || {
         if let Some(peer) = args.peer {
-            rpc.join(peer).await
+            rpc.join(peer, rpc_queue_tx).await
         } else {
-            rpc.run().await
+            rpc.run(rpc_queue_tx).await
         }
     };
 
     tokio::select! {
-        r = raft.run() => { println!("Raft aborted: {r:?}") },
-        r = run_rpc() => { println!("RPC aborted: {r:?}") },
-        r = log.run() => { println!("Log aborted: {r:?}") }
+        r = raft.run(rpc_queue_rx) => { println!("Raft aborted: {r:?}") },
+        r = run_rpc() => { println!("RPC aborted: {r:?}") }
     }
 
     Ok(())

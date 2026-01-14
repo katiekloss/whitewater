@@ -1,24 +1,19 @@
-use std::{io::{Error, ErrorKind, Read}, net::SocketAddr};
+use std::{io::{Error, ErrorKind}, net::SocketAddr};
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::WriteHalf}, sync::mpsc};
-use whitewater::{RaftFrame};
-
-#[derive(Debug)]
-pub enum RpcConnectionEvent {
-    Connected(SocketAddr, mpsc::Receiver<RaftFrame>, mpsc::Sender<RaftFrame>)
-}
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::WriteHalf}, sync::{broadcast, mpsc}};
+use whitewater::{IncomingRaftFrame, RaftFrame};
 
 pub struct RpcListener {
-    // maybe just move this into run and join
-    pub connection_queue: mpsc::Sender<RpcConnectionEvent>
 }
 
 impl RpcListener {
-    pub async fn run(&self) -> Result<(), Error> {
+    pub async fn run(&self, queue: broadcast::Sender<IncomingRaftFrame>) -> Result<(), Error> {
         let listener = TcpListener::bind("0.0.0.0:7778").await?;
+        println!("RPC started");
+
         loop {
             let (conn, addr) = listener.accept().await?;
-            let its_queue = self.connection_queue.clone();
+            let its_queue = queue.clone();
             _ = tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(its_queue, conn, addr).await {
                     println!("Connection with {addr} dropped: {e}");
@@ -27,21 +22,21 @@ impl RpcListener {
         }
     }
 
-    pub async fn join(&self, peer: SocketAddr) -> Result<(), Error> {
+    pub async fn join(&self, peer: SocketAddr, queue: broadcast::Sender<IncomingRaftFrame>) -> Result<(), Error> {
         let socket = TcpStream::connect(peer).await?;
-        Self::handle_connection(self.connection_queue.clone(), socket, peer).await?;
+        println!("RPC started");
+        Self::handle_connection(queue.clone(), socket, peer).await?;
 
         Ok(())
     }
 
-    async fn handle_connection(connection_queue: mpsc::Sender<RpcConnectionEvent>, mut conn: TcpStream, peer: SocketAddr) -> Result<(), Error> {
+    async fn handle_connection(queue: broadcast::Sender<IncomingRaftFrame>, mut conn: TcpStream, peer: SocketAddr) -> Result<(), Error> {
         println!("RPC connected to {peer:?}");
 
         let (mut conn_rx, mut conn_tx) = conn.split();
-        let (recv_queue_tx, recv_queue_rx) = mpsc::channel(16);
         let (send_queue_tx, mut send_queue_rx) = mpsc::channel(16);
 
-        if let Err(e) = connection_queue.send(RpcConnectionEvent::Connected(peer, recv_queue_rx, send_queue_tx)).await {
+        if let Err(e) = queue.send(IncomingRaftFrame::Connect(peer, send_queue_tx)) {
             eprintln!("Failed to start connection to {peer}: {e}");
             let _ = conn_tx.shutdown();
             return Err(ErrorKind::BrokenPipe.into());
@@ -58,7 +53,7 @@ impl RpcListener {
                 r = conn_rx.read(&mut buf) => {
                     match r {
                         Ok(0) => Err(ErrorKind::ConnectionAborted.into()),
-                        Ok(n) => Self::on_net_receive(&buf[..n], &recv_queue_tx).await,
+                        Ok(n) => Self::on_net_receive(&buf[..n], peer, &queue).await, // this clones peer btw
                         Err(e) => Err(e)
                     }
                 }
@@ -85,19 +80,19 @@ impl RpcListener {
                 }
             },
             None => {
-                //println!("Hanging up on {peer}");
-                return Ok(())
+                println!("Hanging up on {}", conn_tx.peer_addr().unwrap());
+                return Err(ErrorKind::ConnectionAborted.into());
             }
         }
 
         Ok(())
     }
 
-    async fn on_net_receive(buf: &[u8], mut recv_queue_tx: &mpsc::Sender<RaftFrame>) -> Result<(), Error> {
+    async fn on_net_receive(buf: &[u8], peer: SocketAddr, mut queue: &broadcast::Sender<IncomingRaftFrame>) -> Result<(), Error> {
 
         match rmp_serde::from_slice::<RaftFrame>(buf) {
             Ok(frame) => {
-                if let Err(e) = recv_queue_tx.send(frame).await {
+                if let Err(e) = queue.send(IncomingRaftFrame::Normal { peer, frame }) {
                     panic!("Can't queue received frame: {e}");
                 }
             },

@@ -1,4 +1,17 @@
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+#[derive(Clone, Debug)]
+pub enum IncomingRaftFrame {
+    Connect(SocketAddr, mpsc::Sender<RaftFrame>),
+    Normal {
+        peer: SocketAddr,
+        frame: RaftFrame
+    },
+    Disconnect(SocketAddr)
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftFrame {
@@ -12,7 +25,10 @@ pub enum RaftFrame {
         commit_index: u64,
         logs: Vec<ShortLogEntry>
     },
-    Set(String, String)
+    Set {
+        key: String,
+        value: String
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
