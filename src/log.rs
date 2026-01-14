@@ -3,6 +3,17 @@ use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}, sync::
 use tokio::sync::{mpsc, oneshot};
 use whitewater::{CompleteLogEntry, ShortLogEntry};
 
+pub enum LogRpc {
+    Write {
+        entry: ShortLogEntry,
+        response: oneshot::Sender<CompleteLogEntry>
+    },
+    Get {
+        from: u64,
+        response: oneshot::Sender<Vec<CompleteLogEntry>>
+    }
+}
+
 pub struct LogWrite {
     pub entry: ShortLogEntry,
     pub response: oneshot::Sender<CompleteLogEntry>
@@ -10,18 +21,20 @@ pub struct LogWrite {
 
 pub struct RaftLog {
     pub term: u64,
-    queue: mpsc::Receiver<LogWrite>,
+    queue: mpsc::Receiver<LogRpc>,
     /// Protects both the commit index and the log file
-    pub commit_index: Mutex<u64>
+    pub commit_index: Mutex<u64>,
+    log: Option<Vec<CompleteLogEntry>>
 }
 
 impl RaftLog {
-    pub(crate) fn new(queue: mpsc::Receiver<LogWrite>) -> Self {
+    pub(crate) fn new(queue: mpsc::Receiver<LogRpc>) -> Self {
         
         Self {
             term: 0,
             queue,
-            commit_index: Mutex::new(0)
+            commit_index: Mutex::new(0),
+            log: None
         }
     }
 
@@ -67,6 +80,7 @@ impl RaftLog {
             }
 
             println!("Loaded {} entries, term {}, index {}", logs.len(), self.term, *index);
+            self.log = Some(logs);
         }
 
         map
@@ -75,12 +89,23 @@ impl RaftLog {
     pub async fn run(mut self) {
         loop {
             match self.queue.recv().await {
-                Some(write) => {
-                    match self.write_log(write.entry.key, write.entry.value) {
-                        Ok(entry) => write.response.send(entry).unwrap(),
+                Some(LogRpc::Write { entry, response }) => {
+                    match self.write_log(entry.key, entry.value) {
+                        Ok(entry) => response.send(entry).unwrap(),
                         Err(e) => panic!("{e}")
                     };
                 },
+                Some(LogRpc::Get { from, response }) => {
+                    match self.log {
+                        None => {
+                            panic!("Log isn't loaded");
+                        }
+                        Some(ref log) => {
+                            // don't copy here (but the whole program probably shouldn't use message passing ugh)
+                            response.send(log.iter().filter(|e| (**e).index <= from).map(|e| e.clone()).collect());
+                        }
+                    };
+                }
                 None => {
                     break;
                 }

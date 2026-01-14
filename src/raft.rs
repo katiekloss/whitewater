@@ -4,7 +4,7 @@ use std::{collections::HashMap, io::{self, Error}, net::SocketAddr};
 use tokio::{sync::{mpsc::{self}, oneshot}, task::JoinSet};
 use whitewater::{CompleteLogEntry, RaftFrame, ShortLogEntry};
 
-use crate::{log::{LogWrite}, rpc::RpcConnectionEvent};
+use crate::{log::{LogRpc, LogWrite}, rpc::RpcConnectionEvent};
 
 enum Event {
     WriteCommitted(CompleteLogEntry)
@@ -13,7 +13,7 @@ enum Event {
 pub struct Raft {
     connection_queue: mpsc::Receiver<RpcConnectionEvent>,
     map: HashMap<String,String>,
-    log: mpsc::Sender<LogWrite>,
+    log: mpsc::Sender<LogRpc>,
     pub term: u64,
     pub commit_index: u64
 }
@@ -24,7 +24,7 @@ struct RaftConnection {
     recv: mpsc::Receiver<RaftFrame>,
     next_index: u64,
     current_position: u64,
-    log: mpsc::Sender<LogWrite>
+    log: mpsc::Sender<LogRpc>
 }
 
 impl RaftConnection {
@@ -48,7 +48,7 @@ impl RaftConnection {
                 },
                 RaftFrame::Set(key, value) => {
                     let (response_tx, response_rx) = oneshot::channel();
-                    let write = LogWrite {
+                    let write = LogRpc::Write {
                         entry: ShortLogEntry {
                             key,
                             value
@@ -82,7 +82,7 @@ impl RaftConnection {
 }
 
 impl Raft {
-    pub(crate) fn new(connection_queue: mpsc::Receiver<RpcConnectionEvent>, log: mpsc::Sender<LogWrite>) -> io::Result<Self> {
+    pub(crate) fn new(connection_queue: mpsc::Receiver<RpcConnectionEvent>, log: mpsc::Sender<LogRpc>) -> io::Result<Self> {
         let map = HashMap::new();
 
         Ok(Self {
