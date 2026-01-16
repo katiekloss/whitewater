@@ -23,7 +23,7 @@ async fn main() -> io::Result<()> {
 
     let (rpc_queue_tx, rpc_queue_rx) = broadcast::channel(128);
 
-    let raft = Raft::new()?;
+    let raft = Raft::new().await?;
 
     let rpc = RpcListener {};
 

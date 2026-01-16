@@ -1,7 +1,7 @@
 use core::panic;
-use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::Mutex};
+use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::{RwLock}};
 
-use tokio::sync::broadcast::{self};
+use tokio::sync::{broadcast::{self}, mpsc};
 use whitewater::{CompleteLogEntry, IncomingRaftFrame, RaftFrame};
 use crate::log::RaftLog;
 
@@ -11,53 +11,47 @@ pub enum Event {
 }
 
 pub struct Raft {
-    map: HashMap<String,String>,
-    log: Mutex<RaftLog>,
-    pub term: u64,
-    pub commit_index: u64,
-    pub global_send: Option<broadcast::Sender<Event>>
+    log: RwLock<RaftLog>,
+    connections: HashMap<SocketAddr, mpsc::Sender<RaftFrame>>,
+    ev_send: broadcast::Sender<Event>,
+    ev_recv: broadcast::Receiver<Event>
 }
 
 impl Raft {
-    pub(crate) fn new() -> io::Result<Self> {
-        let map = HashMap::new();
+    pub(crate) async fn new() -> io::Result<Self> {
+        let (ev_send, ev_recv) = broadcast::channel(128);
+
+        let log = RwLock::new(RaftLog::new());
 
         Ok(Self {
-            map,
-            log: Mutex::new(RaftLog::new()),
-            term: 0,
-            commit_index: 0,
-            global_send: None
+            connections: HashMap::new(),
+            ev_send,
+            ev_recv,
+            log
         })
     }
 
     pub async fn run(mut self, frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
-        {
-            let mut log = self.log.lock().unwrap();
-            (self.term, self.commit_index, self.map) = log.load().await;
-        }
 
         tokio::select! {
             r = self.handle_frames(frame_queue) => r,
         }
     }
 
-    async fn handle_frames(&self, mut frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
+    async fn handle_frames(&mut self, mut frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
         println!("Raft started");
 
-        // this keeps the queues from being dropped in the loop, which immediately hangs up on the peer,
-        // but they eventually need to go somewhere so we can talk to our friends
-        let mut queues = vec![];
         loop {
             match frame_queue.recv().await {
                 Ok(IncomingRaftFrame::Connect(peer, queue)) => {
                     println!("{peer} connected");
 
-                    if let Err(e) = queue.send(RaftFrame::Initialize { current_position: self.commit_index }).await {
+                    let core = self.log.read().unwrap();
+                    if let Err(e) = queue.send(RaftFrame::Initialize { current_position: core.commit_index }).await {
                         println!("Failed to initialize {peer}: {e}");
                     }
 
-                    queues.push(queue);
+                    self.connections.insert(peer, queue);
                 },
                 Ok(IncomingRaftFrame::Normal { peer, frame}) => {
                     self.on_frame(peer, frame).await;
@@ -77,16 +71,25 @@ impl Raft {
 
     // this needs to be mut self in order for handle_set to take the lock,
     // but that moves self out of the main loop, which is what I'm getting stuck on every time
-    async fn on_frame(&self, peer: SocketAddr, frame: RaftFrame) {
+    async fn on_frame(&mut self, peer: SocketAddr, frame: RaftFrame) {
         println!("{peer}: {frame:?}");
+        match frame {
+            RaftFrame::Set { key, value } => {
+                self.handle_set(key, value).await;
+            },
+            _ => {
+
+            }
+        }
     }
 
     async fn handle_set(&mut self, key: String, value: String) {
-        let log = self.log.lock().unwrap();
+        let mut log = self.log.write().unwrap();
 
-        match log.write_log(key, value) {
-            Ok(entry) => self.global_send.as_ref().expect("Raft was not properly initialized").send(Event::WriteCommitted(entry)),
-            Err(e) => panic!("{e}")
-        };
+        let entry = log.write_log(key, value).expect("Failed to write log");
+
+        if let Err(e) = self.ev_send.send(Event::WriteCommitted(entry)) {
+            panic!("{e}");
+        }
     }
 }

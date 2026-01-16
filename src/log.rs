@@ -3,27 +3,20 @@ use whitewater::CompleteLogEntry;
 
 pub struct RaftLog {
     pub term: u64,
-    /// Protects both the commit index and the log file
-    commit_index: Mutex<u64>,
-    log: Option<Vec<CompleteLogEntry>>
+    pub commit_index: u64,
+    pub map: HashMap<String,String>,
+    log: Vec<CompleteLogEntry>
 }
 
 impl RaftLog {
-    pub(crate) fn new() -> Self {
-        
-        Self {
-            term: 0,
-            commit_index: Mutex::new(0),
-            log: None
-        }
-    }
 
-    /// returns term, commit index, map
-    pub async fn load(&mut self) -> (u64, u64, HashMap<String, String>) {
-        let mut index = self.commit_index.lock().unwrap();
-        
+    pub(crate) fn new() -> Self {
+        // this is probably doing too much
+
+        let mut term = 0;
+        let mut commit_index = 0;
         let mut map = HashMap::new();
-        let mut logs = vec![];
+        let mut log = vec![];
 
         let log_open = OpenOptions::new()
             .read(true)
@@ -47,58 +40,34 @@ impl RaftLog {
                     Ok(entry) => {
                         msgpack_buf.clear();
                         map.insert(entry.key.clone(), entry.value.clone());
-                        if self.term < entry.term {
-                            self.term = entry.term
+                        if term < entry.term {
+                            term = entry.term
                         }
 
-                        if *index < entry.index {
-                            *index = entry.index;
+                        if commit_index < entry.index {
+                            commit_index = entry.index;
                         }
-                        logs.push(entry);
+                        log.push(entry);
                     }
                     _ => {}
                 }
             }
 
-            println!("Loaded {} entries, term {}, index {}", logs.len(), self.term, *index);
-            self.log = Some(logs);
+            println!("Loaded {} entries, term {}, index {}", log.len(), term, commit_index);
         }
 
-        (self.term, *index, map)
+        
+        Self {
+            term,
+            commit_index,
+            map: HashMap::new(),
+            log
+        }
     }
 
-    // pub async fn run(mut self) {
-    //     loop {
-    //         match self.queue.recv().await {
-    //             Some(LogRpc::Write { entry, response }) => {
-    //                 match self.write_log(entry.key, entry.value) {
-    //                     Ok(entry) => response.send(entry).unwrap(),
-    //                     Err(e) => panic!("{e}")
-    //                 };
-    //             },
-    //             Some(LogRpc::Get { from, response }) => {
-    //                 match self.log {
-    //                     None => {
-    //                         panic!("Log isn't loaded");
-    //                     }
-    //                     Some(ref log) => {
-    //                         // don't copy here (but the whole program probably shouldn't use message passing ugh)
-    //                         response.send(log.iter().filter(|e| (**e).index <= from).map(|e| e.clone()).collect());
-    //                     }
-    //                 };
-    //             }
-    //             None => {
-    //                 break;
-    //             }
-    //         }
-            
-    //     }
-    // }
-
     /// Writes a KV pair to disk, appends a log entry for it to the queue, and returns its commit index
-    pub fn write_log(&self, key: String, value: String) -> io::Result<CompleteLogEntry> {
-        let mut commit_index = self.commit_index.lock().unwrap();
-        *commit_index += 1;
+    pub fn write_log(&mut self, key: String, value: String) -> io::Result<CompleteLogEntry> {
+        self.commit_index += 1;
 
         let mut log_file = OpenOptions::new()
             .create(true)
@@ -107,7 +76,7 @@ impl RaftLog {
 
         let log = CompleteLogEntry {
             term: self.term,
-            index: *commit_index,
+            index: self.commit_index,
             key: key,
             value: value
         };
@@ -116,6 +85,8 @@ impl RaftLog {
 
         log_file.write_all(&buf)?;
 
+        // is this copy necessary?
+        self.map.insert(log.key.clone(), log.value.clone());
         Ok(log)
     }
 }
