@@ -1,5 +1,6 @@
-use std::io;
+use std::io::{self};
 use std::net::SocketAddr;
+
 use clap::Parser;
 use tokio::sync::broadcast;
 
@@ -23,9 +24,8 @@ async fn main() -> io::Result<()> {
 
     let (rpc_queue_tx, rpc_queue_rx) = broadcast::channel(128);
 
-    let raft = Raft::new().await?;
-
     let rpc = RpcListener {};
+    let raft = Raft::new();
 
     let run_rpc = async || {
         if let Some(peer) = args.peer {

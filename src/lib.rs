@@ -1,10 +1,17 @@
-use std::net::SocketAddr;
+use std::{fmt::Display, net::SocketAddr};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RaftMode {
+    Leader,
+    Follower
+}
+
 #[derive(Clone, Debug)]
 pub enum IncomingRaftFrame {
+    Mode(RaftMode),
     Connect(SocketAddr, mpsc::Sender<RaftFrame>),
     Normal {
         peer: SocketAddr,

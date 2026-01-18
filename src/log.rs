@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}, sync::Mutex};
+use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}};
 use whitewater::CompleteLogEntry;
 
 pub struct RaftLog {

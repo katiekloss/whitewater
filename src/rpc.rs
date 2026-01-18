@@ -8,6 +8,8 @@ pub struct RpcListener {
 
 impl RpcListener {
     pub async fn run(&self, queue: broadcast::Sender<IncomingRaftFrame>) -> Result<(), Error> {
+        queue.send(IncomingRaftFrame::Mode(whitewater::RaftMode::Leader));
+
         let listener = TcpListener::bind("0.0.0.0:7778").await?;
         println!("RPC started");
 
@@ -23,6 +25,8 @@ impl RpcListener {
     }
 
     pub async fn join(&self, peer: SocketAddr, queue: broadcast::Sender<IncomingRaftFrame>) -> Result<(), Error> {
+        queue.send(IncomingRaftFrame::Mode(whitewater::RaftMode::Follower));
+
         let socket = TcpStream::connect(peer).await?;
         println!("RPC started");
         Self::handle_connection(queue.clone(), socket, peer).await?;
