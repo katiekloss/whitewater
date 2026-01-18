@@ -1,11 +1,11 @@
 use core::panic;
-use std::{collections::HashMap, io::{self}, net::SocketAddr, sync::{RwLock}};
+use std::{collections::HashMap, io::{self, ErrorKind}, net::SocketAddr, sync::RwLock};
 
 use tokio::sync::{broadcast::{self}, mpsc};
 use whitewater::{CompleteLogEntry, IncomingRaftFrame, RaftFrame};
 use crate::log::RaftLog;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Event {
     WriteCommitted(CompleteLogEntry)
 }
@@ -31,46 +31,46 @@ impl Raft {
         })
     }
 
-    pub async fn run(mut self, frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
+    pub async fn run(mut self, mut frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
+        loop {
+            let result = tokio::select! {
+                Ok(frame) = frame_queue.recv() => self.handle_frame(frame).await,
+                Ok(event) = self.ev_recv.recv() => self.on_event(event).await,
+                else => Err(ErrorKind::ConnectionAborted.into())
+            };
 
-        tokio::select! {
-            r = self.handle_frames(frame_queue) => r,
+            if let Err(e) = result {
+                break;
+            }
         }
+
+        Ok(())
     }
 
-    async fn handle_frames(&mut self, mut frame_queue: broadcast::Receiver<IncomingRaftFrame>) -> io::Result<()> {
-        println!("Raft started");
+    async fn handle_frame(&mut self, frame: IncomingRaftFrame) -> io::Result<()> {
+        match frame {
+            IncomingRaftFrame::Connect(peer, queue) => {
+                println!("{peer} connected");
 
-        loop {
-            match frame_queue.recv().await {
-                Ok(IncomingRaftFrame::Connect(peer, queue)) => {
-                    println!("{peer} connected");
-
-                    let core = self.log.read().unwrap();
-                    if let Err(e) = queue.send(RaftFrame::Initialize { current_position: core.commit_index }).await {
-                        println!("Failed to initialize {peer}: {e}");
-                    }
-
-                    self.connections.insert(peer, queue);
-                },
-                Ok(IncomingRaftFrame::Normal { peer, frame}) => {
-                    self.on_frame(peer, frame).await;
-                },
-                Ok(IncomingRaftFrame::Disconnect(peer)) => {
-                    println!("{peer} disconnected");
-                },
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Ok(());
-                },
-                Err(e) => {
-                    panic!("{e}");
+                let log = self.log.read().unwrap();
+                if let Err(e) = queue.send(RaftFrame::Initialize { current_position: log.commit_index }).await {
+                    println!("Failed to initialize {peer}: {e}");
                 }
+
+                self.connections.insert(peer, queue);
+                return Ok(())
+            },
+            IncomingRaftFrame::Normal { peer, frame} => {
+                self.on_frame(peer, frame).await;
+                return Ok(())
+            },
+            IncomingRaftFrame::Disconnect(peer) => {
+                println!("{peer} disconnected");
+                return Ok(())
             }
         }
     }
 
-    // this needs to be mut self in order for handle_set to take the lock,
-    // but that moves self out of the main loop, which is what I'm getting stuck on every time
     async fn on_frame(&mut self, peer: SocketAddr, frame: RaftFrame) {
         println!("{peer}: {frame:?}");
         match frame {
@@ -81,6 +81,11 @@ impl Raft {
 
             }
         }
+    }
+
+    async fn on_event(&mut self, result: Event) -> io::Result<()> {
+        println!("{result:?}");
+        Ok(())
     }
 
     async fn handle_set(&mut self, key: String, value: String) {
