@@ -1,5 +1,5 @@
 use std::{collections::HashMap, fs::OpenOptions, io::{self, Read, Write}};
-use whitewater::CompleteLogEntry;
+use whitewater::{CompleteLogEntry, ShortLogEntry};
 
 pub struct RaftLog {
     pub term: u64,
@@ -89,4 +89,5 @@ impl RaftLog {
         self.map.insert(log.key.clone(), log.value.clone());
         Ok(log)
     }
+
 }

@@ -20,7 +20,8 @@ pub struct Raft {
 }
 
 struct Connection {
-    position: u64,
+    term: u64,
+    index: u64,
     sender: mpsc::Sender<RaftFrame>
 }
 
@@ -65,11 +66,11 @@ impl Raft {
                 println!("{peer} connected");
 
                 let log = self.log.read().unwrap();
-                if let Err(e) = queue.send(RaftFrame::Initialize { current_position: log.commit_index }).await {
+                if let Err(e) = queue.send(RaftFrame::Ack { term: log.term, index: log.commit_index }).await {
                     println!("Failed to initialize {peer}: {e}");
                 }
 
-                self.connections.insert(peer, Connection { position: 0, sender: queue });
+                self.connections.insert(peer, Connection { term: 0, index: 0, sender: queue });
             },
             IncomingRaftFrame::Normal { peer, frame} => {
                 self.on_frame(peer, frame).await;
@@ -88,8 +89,25 @@ impl Raft {
             RaftFrame::Set { key, value } => {
                 self.handle_set(key, value).await;
             },
-            RaftFrame::Initialize { current_position } => {
-                self.connections.get_mut(&peer).unwrap().position = current_position;
+            RaftFrame::Ack { term, index } => {
+                let conn = self.connections.get_mut(&peer).unwrap();
+                conn.term = term;
+                conn.index = index;
+            },
+            RaftFrame::AppendLogs { term, prev_log_index, prev_log_term, commit_index, logs } => {
+                let mut log = self.log.write().unwrap();
+                if term < log.term {
+                    // nah
+                }
+                
+                for entry in logs {
+                    log.write_log(entry.key, entry.value);
+                }
+
+                self.connections.get_mut(&peer).unwrap().sender.send(RaftFrame::Ack { term: log.term, index: log.commit_index }).await;
+            },
+            RaftFrame::Ack { term, index } => {
+                self.connections.get_mut(&peer).unwrap().index = index;
             },
             _ => {
 
@@ -99,6 +117,17 @@ impl Raft {
 
     async fn on_event(&mut self, result: Event) -> io::Result<()> {
         println!("{result:?}");
+
+        match result {
+            Event::WriteCommitted(entry) => {
+                let log = self.log.read().unwrap();
+                for queue in self.connections.values() {
+                    let entry = entry.clone();
+                    queue.sender.send(RaftFrame::AppendLogs { term: entry.term, prev_log_index: log.commit_index, prev_log_term: log.term, commit_index: entry.index, logs: vec![entry.into()] }).await;
+                }
+            }
+        }
+
         Ok(())
     }
 

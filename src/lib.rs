@@ -22,9 +22,6 @@ pub enum IncomingRaftFrame {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RaftFrame {
-    Initialize {
-        current_position: u64
-    },
     AppendLogs {
         term: u64,
         prev_log_index: u64,
@@ -35,6 +32,10 @@ pub enum RaftFrame {
     Set {
         key: String,
         value: String
+    },
+    Ack {
+        term: u64,
+        index: u64
     }
 }
 
@@ -50,4 +51,10 @@ pub struct CompleteLogEntry {
     pub index: u64,
     pub key: String,
     pub value: String
+}
+
+impl Into<ShortLogEntry> for CompleteLogEntry {
+    fn into(self) -> ShortLogEntry {
+        ShortLogEntry { key: self.key, value: self.value }
+    }
 }
